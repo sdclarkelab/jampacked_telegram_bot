@@ -114,7 +114,7 @@ def handle_response(user_message: str) -> str:
         )
         return response_from_chatgpt.choices[0].message.content or ""
     except Exception as exc:  # noqa: BLE001
-        logger.exception("OpenAI request failed: %s", exc)
+        logger.exception(f"OpenAI request failed: {exc}")
         return "Sorry, I couldn't generate a response just now. Please try again later."
 
 
@@ -122,7 +122,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     message: str = update.message.text
     message_type: str = update.message.chat.type
 
-    logger.info('User (%s) in %s: "%s"', update.message.chat.id, message_type, message)
+    logger.info(f'User ({update.message.chat.id}) in {message_type}: "{message}"')
 
     if message_type in {"group", "supergroup"}:
         if BOT_USERNAME in message:
@@ -131,12 +131,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
     response: str = handle_response(message)
-    logger.info("Bot response: %s", response)
+    logger.info(f"Bot response: {response}")
     await update.message.reply_text(response)
 
 
 async def error(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.exception("Update %s caused error %s", update, context.error)
+    logger.exception(f"Update {update} caused error {context.error}")
 
 
 if __name__ == "__main__":
