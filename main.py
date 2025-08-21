@@ -1,6 +1,9 @@
 import logging
 import os
+import re
 import textwrap
+import time
+from collections import defaultdict
 from typing import Final
 
 from dotenv import load_dotenv
@@ -25,6 +28,10 @@ OPENAI_MODEL: Final = "gpt-3.5-turbo"
 
 # Initialize OpenAI client (may be None if key missing)
 client: OpenAI | None = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+# Simple rate limiting - track requests per user
+user_request_times = defaultdict(list)
+MAX_REQUESTS_PER_MINUTE = 5
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +66,63 @@ async def negril_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(response)
 
 
+# Input validation and sanitization
+
+def is_rate_limited(user_id: int) -> bool:
+    """Check if user has exceeded rate limit."""
+    current_time = time.time()
+    user_times = user_request_times[user_id]
+    
+    # Remove requests older than 1 minute
+    user_times[:] = [t for t in user_times if current_time - t < 60]
+    
+    if len(user_times) >= MAX_REQUESTS_PER_MINUTE:
+        return True
+    
+    # Add current request time
+    user_times.append(current_time)
+    return False
+
+
+def sanitize_user_input(user_input: str) -> str | None:
+    """Sanitize and validate user input before processing.
+    
+    Returns sanitized input or None if input is invalid.
+    """
+    if not user_input or not isinstance(user_input, str):
+        return None
+    
+    # Length validation - limit to reasonable size
+    if len(user_input.strip()) > 500:
+        return None
+    
+    # Basic sanitization - remove excessive whitespace and control characters
+    sanitized = re.sub(r'\s+', ' ', user_input.strip())
+    sanitized = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', sanitized)
+    
+    # Check for potential injection attempts or malicious patterns
+    suspicious_patterns = [
+        r'(?i)system\s*prompt',
+        r'(?i)ignore\s+previous',
+        r'(?i)forget\s+everything',
+        r'(?i)you\s+are\s+now',
+        r'(?i)new\s+instructions',
+        r'(?i)role\s*:\s*system',
+        r'(?i)</\s*system\s*>',
+        r'(?i)<\s*system\s*>',
+    ]
+    
+    for pattern in suspicious_patterns:
+        if re.search(pattern, sanitized):
+            return None
+    
+    # Ensure minimum length after sanitization
+    if len(sanitized) < 3:
+        return None
+        
+    return sanitized
+
+
 # Responses
 
 def handle_response(user_message: str) -> str:
@@ -66,6 +130,11 @@ def handle_response(user_message: str) -> str:
 
     Falls back to a friendly error if OpenAI is not configured or fails.
     """
+    
+    # Sanitize user input first
+    sanitized_message = sanitize_user_input(user_message)
+    if sanitized_message is None:
+        return "Please send a valid message about crowd levels in Jamaica (e.g., 'Will Ocho Rios be packed this weekend?')"
 
     system_prompt = textwrap.dedent(
         """
@@ -124,7 +193,7 @@ def handle_response(user_message: str) -> str:
             model=OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
+                {"role": "user", "content": sanitized_message},
             ],
         )
         return response_from_chatgpt.choices[0].message.content or ""
@@ -136,8 +205,16 @@ def handle_response(user_message: str) -> str:
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message: str = update.message.text
     message_type: str = update.message.chat.type
+    user_id: int = update.message.from_user.id
 
-    logger.info(f'User ({update.message.chat.id}) in {message_type}: "{message}"')
+    logger.info(f'User ({user_id}) in {message_type}: "{message}"')
+
+    # Check rate limiting
+    if is_rate_limited(user_id):
+        await update.message.reply_text(
+            "You're sending messages too quickly. Please wait a minute before trying again."
+        )
+        return
 
     if message_type in {"group", "supergroup"}:
         if BOT_USERNAME in message:
@@ -160,8 +237,15 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
     )
 
+    # Validate required environment variables
+    missing_vars = []
     if not TELEGRAM_TOKEN:
-        logger.error("TELEGRAM_TOKEN is not set. Please configure your environment.")
+        missing_vars.append("TELEGRAM_TOKEN")
+    if not OPENAI_API_KEY:
+        missing_vars.append("OPENAI_API_KEY")
+    
+    if missing_vars:
+        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}. Please configure your environment.")
         raise SystemExit(1)
 
     logger.info("Starting bot ...")
